@@ -8,13 +8,14 @@ import scipy.stats as ss
 import os
 import sys
 import time
-from .nutsjump import NUTSJump, HMCJump, MALAJump
+
+from sampler.PTMCMC.PTMCMCSampler.nutsjump import NUTSJump, HMCJump, MALAJump
 
 try:
     from mpi4py import MPI
 except ImportError:
     print('Do not have mpi4py package.')
-    from . import nompi4py as MPI
+    import nompi4py as MPI
 
 try:
     import acor
@@ -60,7 +61,8 @@ class PTSampler(object):
 
     def __init__(self, ndim, logl, logp, cov, groups=None, loglargs=[], loglkwargs={},
                  logpargs=[], logpkwargs={}, logl_grad=None, logp_grad=None,
-                 comm=MPI.COMM_WORLD, outDir='./chains', verbose=True, resume=False):
+                 comm=MPI.COMM_WORLD, outDir='./chains', verbose=True, resume=False,
+                 progressPath=None, progressRate=1000):
 
         # MPI initialization
         self.comm = comm
@@ -68,6 +70,7 @@ class PTSampler(object):
         self.nchain = self.comm.Get_size()
 
         self.ndim = ndim
+        self.original_logl = logl
         self.logl = _function_wrapper(logl, loglargs, loglkwargs)
         self.logp = _function_wrapper(logp, logpargs, logpkwargs)
         if logl_grad is not None and logp_grad is not None:
@@ -80,6 +83,13 @@ class PTSampler(object):
         self.outDir = outDir
         self.verbose = verbose
         self.resume = resume
+
+        if self.MPIrank == 0:
+            self.progressPath = progressPath
+            self.progressRate = progressRate
+            self.timestamps = []
+            self.n_fevals = []
+            self.iters = []
 
         # setup output file
         if not os.path.exists(self.outDir):
@@ -361,6 +371,11 @@ class PTSampler(object):
             p0, lnlike0, lnprob0 = self.PTMCMCOneStep(
                 p0, lnlike0, lnprob0, iter)
 
+            if self.MPIrank == 0 and self.progressPath is not None and iter % self.progressRate == 0:
+                self.iters = iter
+                self.timestamps.append(time.time())
+                self.n_fevals.append(self.original_logl.counter*self.nchain)
+                np.savez(self.progressPath+"/progress", iter=iter, n_fevals=self.n_fevals, timestamps=self.timestamps)
             # compute effective number of samples
             if iter % 1000 == 0 and iter > 2 * self.burn and self.MPIrank == 0:
                 try:
@@ -392,6 +407,11 @@ class PTSampler(object):
             if self.MPIrank > 0:
                 runComplete = self.comm.Iprobe(source=0, tag=55)
                 time.sleep(0.000001)  # trick to get around
+
+        if self.MPIrank > 0:
+            return [None, None, None]
+        else:
+            return [self.iters, self.timestamps, self.n_fevals]
 
     def PTMCMCOneStep(self, p0, lnlike0, lnprob0, iter):
         """
